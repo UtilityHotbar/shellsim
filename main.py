@@ -260,8 +260,7 @@ class Computer(cmd.Cmd):
                 return 'FILE_NOT_FOUND_ERROR'
         if target_file == '%SPECIAL_RANDOM_FILE%':
             self.output = random.random()
-        newlines_or_semicolons = re.compile(r'(\\n|;)')
-        body = re.split(newlines_or_semicolons, target_file)
+        body = target_file.split('\n')
         pointer = 0
         return_stack = []
         delete_next = False
