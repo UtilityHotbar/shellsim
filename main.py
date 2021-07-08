@@ -204,7 +204,7 @@ class Computer(cmd.Cmd):
         self.variables['$'+name] = value
 
     def do_let(self, args):
-        """Declare variable as product of expression: declare VAR_NAME=EXPR"""
+        """Declare variable as result of expression: declare VAR_NAME=EXPR"""
         args = [x.strip() for x in args.split('=')]
         name = args[0]
         value = args[1]
@@ -293,7 +293,7 @@ class Computer(cmd.Cmd):
                 break
 
     def do_cat(self, args):
-        """View contents of file: cat FILE_NAME"""
+        """Concatenate file contents: cat FILE_NAME1 FILE_NAME2 etc."""
         files = args.split(' ')
         output = []
         for file in files:
@@ -347,7 +347,7 @@ class Computer(cmd.Cmd):
         self.output = self.cwd
 
     def do_touch(self, args):
-        """Create new file: touch FILENAME"""
+        """Create new file: touch FILE_PATH"""
         file_path = '/'.join(args.split('/')[:-1])
         file_name = args.split('/')[-1]
         if self.check_invalid_name(file_name):
@@ -359,7 +359,7 @@ class Computer(cmd.Cmd):
                 attempt[file_name] = ''
 
     def do_del(self, args):
-        """Delete file: del FILENAME"""
+        """Delete file: del FILE_PATH"""
         file_path = '/'.join(args.split('/')[:-1])
         file_name = args.split('/')[-1]
         try:
@@ -421,6 +421,7 @@ class Computer(cmd.Cmd):
             self.curr_user = old_user
 
     def do_pkgman(self, args):
+        """Manage external packages: pkgman get / remove PKG_1 PKG_2 etc."""
         args = args.split()
         cmd = args[0]
         packages = args[1:]
