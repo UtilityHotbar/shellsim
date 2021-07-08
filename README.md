@@ -26,7 +26,8 @@ A self-contained simulation of a bash-like shell, with scripting, piping, stream
 * Run shell script: run FILE_PATH
 
 ### Package management
-* Manage external packages - pkgman get / remove PKG_1 PKG_2 etc.
+* Manage external packages: pkgman get / remove PKG_1 PKG_2 etc.
+> Pkgman works by checking the `module_directory` object in `modules.py`. Functions there with a corresponding name will be added as attributes of the `Computer` object callable as commands in the shell. `pkgman remove` will delete the attribute, thus unlinking the function.
 
 ## Advanced Features
 ### Piping
