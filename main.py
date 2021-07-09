@@ -140,7 +140,7 @@ class Computer(cmd.Cmd):
         self.prompt = f'{self.curr_user}@{self.name} $ '
         self.cmdloop()
 
-    def evaluate_expressions(self, line: str):
+    def evaluate_expressions(self, line: str, force_evaluate=False):
         variable_expression = re.compile(r'\$\S+')
         arithmetic_expression = re.compile(r'\(\(\s*(.+)\s*\)\)')
         for variable in re.findall(variable_expression, line):
@@ -159,7 +159,10 @@ class Computer(cmd.Cmd):
                     return self.error_break('EVALUATION_ERROR')
             else:
                 break
-        return line
+        if force_evaluate:
+            return self.eval_expr(line)
+        else:
+            return line
 
     def parseline(self, line: str):
         line = line.split(';')
@@ -299,9 +302,7 @@ class Computer(cmd.Cmd):
             print('Error - if statement does not contain condition.')
             return 'NO_CONDITION_ERROR'
         else:
-            condstring = expr.group(1).replace('-gt', '>').replace('-lt', '<').replace('-n', '0 <').replace('-z',
-                                                                                                            '0 ==').replace(
-                '!', 'not').replace('&&', 'and').replace('||', 'or')
+            condstring = expr.group(1).replace('-gt', '>').replace('-lt', '<').replace('-n', '0 <').replace('-z','0 ==').replace('!', 'not').replace('&&', 'and').replace('||', 'or')
             is_dir = re.search(is_directory_expression, condstring)
             if is_dir:
                 condstring = condstring.replace(is_dir.group(0), f'(type(self.parse_path("{is_dir.group(1)}")) == dict)')
@@ -312,7 +313,7 @@ class Computer(cmd.Cmd):
             if is_notempty:
                 condstring = condstring.replace(is_notempty.group(0),
                                                 f'(len(self.parse_path("{is_notempty.group(1)}")) > 0) and (type(self.parse_path("{is_notempty.group(1)}")) == str)')
-            result = self.evaluate_expressions(condstring)
+            result = self.evaluate_expressions(condstring, force_evaluate=True)
             targets = [_.strip() for _ in line.split('?')[1].split(':')]
             # Just return the result if instructed, otherwise execute then and else
             if return_result:
