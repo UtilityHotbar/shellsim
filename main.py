@@ -10,7 +10,7 @@ import pickle
 class Computer(cmd.Cmd):
     def __init__(self, users=None, drive=None):
         self.name = 'DoorOSMachine'
-        self.specs = {'OS': 'doorOS==3.1', 'defender': None}
+        self.specs = {'OS': 'doorOS==3.1'}
         if not drive:
             self.filesystem = {'welcome.txt': 'Hey there. Thanks for using doorOS. We hope you love us and our product!'}
         else:
