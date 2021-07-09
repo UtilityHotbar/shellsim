@@ -3,14 +3,21 @@ import time
 import random
 import re
 import types
-import modules
+import external_module_repo
 import pickle
+import ast
+import operator as op
 
+operators = {ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
+             ast.Div: op.truediv, ast.Pow: op.pow, ast.BitXor: op.xor,
+             ast.USub: op.neg}
+
+permitted_functions = {'len': len}
 
 class Computer(cmd.Cmd):
     def __init__(self, users=None, drive=None):
         self.name = 'DoorOSMachine'
-        self.specs = {'OS': 'doorOS==3.1'}
+        self.specs = {'OS': 'doorOS==3.1', 'defender': None}
         if not drive:
             self.filesystem = {'welcome.txt': 'Hey there. Thanks for using doorOS. We hope you love us and our product!'}
         else:
@@ -34,9 +41,10 @@ class Computer(cmd.Cmd):
         self.prompt = '(INVALID ACCESS) '
 
         # System variables
-        self.forbidden_chars = ['/', ' ', '>']
+        self.forbidden_chars = ['/', ' ', '>', '*', '\\', '?']
         self.null_output = 'NUL'
         self.variables = {}
+        self.permitted_internal_functions = {'parse_path': self.parse_path}
 
         # Stdio
         self.output = None
@@ -44,6 +52,67 @@ class Computer(cmd.Cmd):
         self.output_location = None
         self.input_stream = []
         super().__init__()
+
+    def eval_expr(self, expr):
+        return self.eval_(ast.parse(expr, mode='eval').body)
+
+    def eval_(self, node):
+        if isinstance(node, ast.Num):  # <number>
+            return node.n
+        elif isinstance(node, ast.Constant):
+            return node.value
+        elif isinstance(node, ast.BinOp):  # <left> <operator> <right>
+            return operators[type(node.op)](self.eval_(node.left), self.eval_(node.right))
+        elif isinstance(node, ast.UnaryOp):  # <operator> <operand> e.g., -1
+            return operators[type(node.op)](self.eval_(node.operand))
+        elif isinstance(node, ast.Compare):
+            curr_left = self.eval_(node.left)
+            if len(node.ops) == 1:
+                curr_right = self.eval_(node.comparators[0])
+            else:
+                curr_right = self.eval_(ast.Compare(left=node.comparators[0], ops=node.ops[1:], comparators=node.comparators[1:]))
+                if curr_right == False:
+                    return False
+                else:
+                    curr_right = self.eval_(node.comparators[1])
+            curr_op = node.ops[0]
+            if isinstance(curr_op, ast.Lt):
+                return curr_left < curr_right
+            elif isinstance(curr_op, ast.LtE):
+                return curr_left <= curr_right
+            elif isinstance(curr_op, ast.Gt):
+                return curr_left > curr_right
+            elif isinstance(curr_op, ast.GtE):
+                return curr_left >= curr_right
+            elif isinstance(curr_op, ast.Eq):
+                return curr_left == curr_right
+            elif isinstance(curr_op, ast.NotEq):
+                return curr_left != curr_right
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                function_namespace = 'foreign'
+                function_name = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                function_namespace = node.func.value.id
+                function_name = node.func.attr
+            else:
+                function_namespace = 'INVALID'
+                function_name = 'ERROR'
+            argvalues = []
+            for arg in node.args:
+                argvalues.append(self.eval_(arg))
+            if function_namespace == 'self':
+                if function_name in self.permitted_internal_functions:
+                    return self.permitted_internal_functions[function_name](*argvalues)
+            else:
+                if function_name in permitted_functions:
+                    return permitted_functions[function_name](*argvalues)
+                print(f'Unknown function {function_name} detected.')
+                return 'EVALUATION_ERROR'
+        else:
+            ast.dump(node)
+            print(f'Evaluation of node {node} failed')
+            raise TypeError(node)
 
     def delay_print(self, *args):
         print(' '.join(args))
@@ -57,8 +126,8 @@ class Computer(cmd.Cmd):
         self.delay_print('Initialising BIOS...')
         self.delay_print(f'Booting {" v.".join(self.specs["OS"].split("=="))}...')
         while True:
-            username = input('Username: ')
-            password = input('Password: ')
+            username = self.request_input('Username: ')
+            password = self.request_input('Password: ')
             try:
                 if password == self.users[username]['password']:
                     if username == 'root':
@@ -84,8 +153,8 @@ class Computer(cmd.Cmd):
             findmath = re.search(arithmetic_expression, line)
             if findmath:
                 try:
-                    line = line.replace(findmath.group(0), str(eval(findmath.group(1))))
-                except:
+                    line = line.replace(findmath.group(0), str(self.eval_expr(findmath.group(1))))
+                except KeyboardInterrupt:
                     print(f'Error - Evaluation of expression {findmath.group(1)} failed.')
                     return self.error_break('EVALUATION_ERROR')
             else:
@@ -96,6 +165,7 @@ class Computer(cmd.Cmd):
         line = line.split(';')
         self.cmdqueue += line[1:]
         line = line[0]
+        line = self.evaluate_expressions(line)
         if '|' in line:
             line = line.split('|')
             self.cmdqueue.append('|'.join(line[1:]))
@@ -112,13 +182,13 @@ class Computer(cmd.Cmd):
             self.output_mode = 'file_overwrite'
             self.output_location = line[1].strip()
             line = line[0]
-        return super().parseline(self.evaluate_expressions(line))
+        return super().parseline(line)
 
     def request_input(self, prompt='Enter input'):
         if not self.input_stream:
             return input(prompt)
         else:
-            return self.input_stream.pop()
+            return self.input_stream.pop(0)
 
     def error_break(self, error_code='ERROR'):
         # Just halt everything, make sure errors don't propagate
@@ -188,6 +258,14 @@ class Computer(cmd.Cmd):
         else:
             return False
 
+    def find_file(self, name, folder):
+        results = []
+        name = re.compile(name.replace('.', '\.').replace('*', '.+').replace('?', '.'))
+        for file in folder:
+            if re.fullmatch(name, file):
+                results.append(file)
+        return results
+
     def do_echo(self, args):
         """Echo input to output: echo INPUT"""
         self.output = args
@@ -208,7 +286,7 @@ class Computer(cmd.Cmd):
         args = [x.strip() for x in args.split('=')]
         name = args[0]
         value = args[1]
-        self.variables['$'+name] = eval(value)
+        self.variables['$'+name] = self.eval_expr(value)
 
     def do_if(self, line, return_result=False):
         """Conditional execution: if [ COND ] ? TRUE_STATEMENT : FALSE_STATEMENT"""
@@ -226,16 +304,15 @@ class Computer(cmd.Cmd):
                 '!', 'not').replace('&&', 'and').replace('||', 'or')
             is_dir = re.search(is_directory_expression, condstring)
             if is_dir:
-                condstring = condstring.replace(is_dir.group(0), f'(type(self.parse_path({is_dir.group(1)})) == dict)')
+                condstring = condstring.replace(is_dir.group(0), f'(type(self.parse_path("{is_dir.group(1)}")) == dict)')
             is_file = re.search(is_file_expression, condstring)
             if is_file:
-                condstring = condstring.replace(is_file.group(0), f'(type(self.parse_path({is_file.group(1)})) == str)')
+                condstring = condstring.replace(is_file.group(0), f'(type(self.parse_path("{is_file.group(1)}")) == str)')
             is_notempty = re.search(is_notempty_expression, condstring)
             if is_notempty:
                 condstring = condstring.replace(is_notempty.group(0),
-                                                f'((len(self.parse_path({is_notempty.group(1)})) > 0) and (type(self.parse_path({is_notempty.group(1)})) == str))')
-            condstring = self.evaluate_expressions(condstring)
-            result = eval(condstring)
+                                                f'(len(self.parse_path("{is_notempty.group(1)}")) > 0) and (type(self.parse_path("{is_notempty.group(1)}")) == str)')
+            result = self.evaluate_expressions(condstring)
             targets = [_.strip() for _ in line.split('?')[1].split(':')]
             # Just return the result if instructed, otherwise execute then and else
             if return_result:
@@ -301,11 +378,12 @@ class Computer(cmd.Cmd):
             try:
                 attempt = self.parse_path(file_path)
                 if type(attempt) == dict:
-                    output.append(attempt[file_name])
+                    for located in self.find_file(file_name, attempt):
+                        output.append(attempt[located])
             except KeyError:
                 print(f'Error - File {file_name} not found.')
                 return 'FILE_NOT_FOUND_ERROR'
-        self.output = ' '.join(output)
+        self.output = '\n'.join(output)
 
     def do_cd(self, args):
         """Change current working directory: cd DIR_PATH"""
@@ -357,14 +435,15 @@ class Computer(cmd.Cmd):
             if type(attempt) == dict:
                 attempt[file_name] = ''
 
-    def do_del(self, args):
-        """Delete file: del FILE_PATH"""
+    def do_rm(self, args):
+        """Delete file: rm FILE_PATH"""
         file_path = '/'.join(args.split('/')[:-1])
         file_name = args.split('/')[-1]
         try:
             attempt, path = self.parse_path(file_path, return_path=True)
             if type(attempt) == dict:
-                del [file_name]
+                for located in self.find_file(file_name, attempt):
+                    del attempt[located]
         except KeyError:
             print(f'Error - File {args} not found.')
             return 'FILE_NOT_FOUND_ERROR'
@@ -427,7 +506,7 @@ class Computer(cmd.Cmd):
         for arg in packages:
             if cmd == 'get':
                 try:
-                    func = modules.module_directory[arg]
+                    func = external_module_repo.module_directory[arg]
                     setattr(self, 'do_'+arg, types.MethodType(func, self))
                 except KeyError:
                     print(f'Error - Module {arg} not found.')
@@ -458,9 +537,6 @@ class Computer(cmd.Cmd):
                 curr_dir = self.parse_path(tempcwd)
             else:
                 try:
-                    if type(curr_dir[item]) != dict:
-                        print(f'Error - directory {item} is not a directory.')
-                        return 'INVALID_PATH_ERROR'
                     curr_dir = curr_dir[item]
                     tempcwd += item
                 except KeyError:
