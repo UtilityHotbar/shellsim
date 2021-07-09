@@ -10,7 +10,7 @@ A self-contained simulation of a bash-like shell, with scripting, piping, stream
 * Remove directory: rmdir DIR_NAME
 * Print current working directory: pwd
 * Create new file: touch FILE_PATH
-* Delete file: del FILE_PATH
+* Delete file: rm FILE_PATH
 * Manage users: user add/del/mod USERNAME OPTIONS
 * Execute command as superuser: sudo COMMAND
 
@@ -39,3 +39,6 @@ A self-contained simulation of a bash-like shell, with scripting, piping, stream
 ### Script flow
 * `goto LABEL` will goto the line with the label `:LABEL`, pushing the current position onto the `return` stack. Useable in shell scripts only.
 * `return` will return to the position in the script after your last `goto` statement. Useable in shell scripts only.
+
+### Filename matching
+`rm` and `cat` support filename matching. `*` to match anything, `?` to match a single character, `[abc]` to match any character in `abc`, `[^abc]` to match any character not in `abc`.
