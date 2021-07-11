@@ -1,0 +1,13 @@
+{
+  "welcome.txt": "Hey there. Thanks for using doorOS. We hope you love us and our product!",
+  "bin": {
+
+  },
+  "users": {
+
+  },
+  "dev": {
+    "null": "%SPECIAL_NULL_FILE%",
+    "urandom": "%SPECIAL_RANDOM_FILE%"
+  }
+}

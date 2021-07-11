@@ -7,22 +7,25 @@ import external_module_repo
 import pickle
 import ast
 import operator as op
+import json
 
 operators = {ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
              ast.Div: op.truediv, ast.Pow: op.pow, ast.BitXor: op.xor,
              ast.USub: op.neg}
 
-permitted_functions = {'len': len}
+permitted_functions = {'len': len, 'type': type}
 
 class Computer(cmd.Cmd):
-    def __init__(self, users=None, drive=None):
+    def __init__(self, users=None, drive=None, save_location="save.pickle"):
         self.name = 'DoorOSMachine'
         self.specs = {'OS': 'doorOS==3.1', 'defender': None}
         if not drive:
-            self.filesystem = {'welcome.txt': 'Hey there. Thanks for using doorOS. We hope you love us and our product!'}
+            with open('dooros_filesystem.json', 'r') as f:
+                self.filesystem = json.load(f)
         else:
             self.filesystem = drive
         self.speed = 0.1
+        self.save_location = save_location
 
         # Current working directory path and directory contents
         self.cwd = '/'
@@ -41,13 +44,15 @@ class Computer(cmd.Cmd):
         self.prompt = '(INVALID ACCESS) '
 
         # System variables
-        self.forbidden_chars = ['/', ' ', '>', '*', '\\', '?']
+        self.forbidden_chars = ['/', ' ', '>', '*', '\\', '?', '{', '}']
         self.null_output = 'NUL'
         self.variables = {}
         self.permitted_internal_functions = {'parse_path': self.parse_path}
 
         # Stdio
         self.output = None
+        self.redirect_output = False
+        self.output_buffer = []
         self.output_mode = 'echo'
         self.output_location = None
         self.input_stream = []
@@ -144,10 +149,13 @@ class Computer(cmd.Cmd):
         variable_expression = re.compile(r'\$\S+')
         arithmetic_expression = re.compile(r'\(\(\s*(.+)\s*\)\)')
         for variable in re.findall(variable_expression, line):
-            try:
-                line = line.replace(variable, str(self.variables[variable]))
-            except KeyError:
-                print(f'Error - Variable {variable} not found.')
+            if (variable[1] == '{') and (variable[-1] == '}'):  # Check for embedded instructions
+                line = line.replace(variable, str(self.onecmd(variable[2:-1])))
+            else:
+                try:
+                    line = line.replace(variable, str(self.variables[variable]))
+                except KeyError:
+                    print(f'Error - Variable {variable} not found.')
                 return self.error_break('VARIABLE_NOT_FOUND_ERROR')
         while True:
             findmath = re.search(arithmetic_expression, line)
@@ -203,8 +211,54 @@ class Computer(cmd.Cmd):
         return error_code
 
     def save(self):
-        with open('save.pickle', 'wb') as f:
+        with open(self.save_location, 'wb') as f:
             pickle.dump((self.users, self.filesystem), f)
+
+    def flush(self):
+        # If there is output either print it, add it to the next command in the command queue,
+        # or stream it to a file
+        if self.output_mode == 'echo':
+            if not self.redirect_output:
+                print(self.output)
+            else:
+                self.output_buffer.append(self.output)
+            self.output = None
+        elif self.output_mode == 'pipe':
+            next_commands = [_.strip() for _ in self.cmdqueue[0].split('|')]
+            # Newlines are the dividers for primitive stdin implementation as well as argument dividing
+            if next_commands[0].startswith('run') or next_commands[0].startswith('read'):
+                self.input_stream += self.output.split('\n')
+            else:
+                added_arguments = self.output
+                if '>' in next_commands[0]:
+                    target_split = next_commands[0].split('>')
+                    next_commands[0] = target_split[0] + ' ' + added_arguments + '>' + target_split[1]
+                elif '>>' in next_commands[0]:
+                    target_split = next_commands[0].split('>>')
+                    next_commands[0] = target_split[0] + ' ' + added_arguments + '>>' + target_split[1]
+                else:
+                    next_commands[0] = next_commands[0] + ' ' + added_arguments
+            self.cmdqueue[0] = '|'.join([next_commands[0]] + next_commands[1:])
+            self.output = None
+        elif self.output_mode == 'file' or self.output_mode == 'file_overwrite':
+            file_path = '/'.join(self.output_location.split('/')[:-1])
+            file_name = self.output_location.split('/')[-1]
+            if file_name != self.null_output:
+                addition_dir = self.parse_path(file_path)
+                if type(addition_dir) == dict:
+                    try:
+                        if self.output_mode == 'file':
+                            if addition_dir[file_name] != '%SPECIAL_NULL_FILE%':
+                                addition_dir[file_name] += self.output
+                        elif self.output_mode == 'file_overwrite':
+                            if addition_dir[file_name] != '%SPECIAL_NULL_FILE%':
+                                addition_dir[file_name] = self.output
+                    except KeyError:
+                        addition_dir[file_name] = self.output
+                else:
+                    print('Error - destination is not a directory')
+                    stop = self.error_break('INVALID_PATH_ERROR')
+            self.output = None
 
     def postcmd(self, stop, line: str) -> bool:
         if stop is None:
@@ -212,49 +266,9 @@ class Computer(cmd.Cmd):
         if stop.endswith('ERROR'):
             self.error_break(stop)
         if self.output:
-            # If there is output either print it, add it to the next command in the command queue,
-            # or stream it to a file
-            if self.output_mode == 'echo':
-                print(self.output)
-                self.output = None
-            elif self.output_mode == 'pipe':
-                next_commands = [_.strip() for _ in self.cmdqueue[0].split('|')]
-                # Newlines are the dividers for primitive stdin implementation as well as argument dividing
-                if next_commands[0].startswith('run') or next_commands[0].startswith('read'):
-                    self.input_stream += self.output.split('\n')
-                else:
-                    added_arguments = ' '.join(self.output.split('\n'))
-                    if '>' in next_commands[0]:
-                        target_split = next_commands[0].split('>')
-                        next_commands[0] = target_split[0] + ' ' + added_arguments + '>' + target_split[1]
-                    elif '>>' in next_commands[0]:
-                        target_split = next_commands[0].split('>>')
-                        next_commands[0] = target_split[0] + ' ' + added_arguments + '>>' + target_split[1]
-                    else:
-                        next_commands[0] = next_commands[0] + ' ' + added_arguments
-                self.cmdqueue[0] = '|'.join([next_commands[0]]+next_commands[1:])
-                self.output_mode = 'echo'
-                self.output = None
-            elif self.output_mode == 'file' or self.output_mode == 'file_overwrite':
-                file_path = '/'.join(self.output_location.split('/')[:-1])
-                file_name = self.output_location.split('/')[-1]
-                if file_name != self.null_output:
-                    addition_dir = self.parse_path(file_path)
-                    if type(addition_dir) == dict:
-                        try:
-                            if self.output_mode == 'file':
-                                if addition_dir[file_name] != '%SPECIAL_NULL_FILE%':
-                                    addition_dir[file_name] += self.output
-                            elif self.output_mode == 'file_overwrite':
-                                if addition_dir[file_name] != '%SPECIAL_NULL_FILE%':
-                                    addition_dir[file_name] = self.output
-                        except KeyError:
-                            addition_dir[file_name] = self.output
-                    else:
-                        print('Error - destination is not a directory')
-                        stop = self.error_break('INVALID_PATH_ERROR')
-                self.output_mode = 'echo'
-                self.output = None
+            self.flush()
+            self.output_mode = 'echo'
+            self.output = None
         if stop == 'EXIT':
             self.error_break()
             return True
@@ -514,6 +528,154 @@ class Computer(cmd.Cmd):
                     return 'MODULE_NOT_FOUND_ERROR'
             elif cmd == 'remove':
                 delattr(self, 'do_'+arg)
+
+    def do_lined(self, args):
+        """Basic line editor: lined"""
+        argqueue = [_.strip() for _ in args.split('\n') if _ != '']
+        arg_expression = re.compile(r'^(\d*,?\d*)(\S+)')
+        document = []
+        mode = 'wait'
+        scope = [0, 0]
+        prompt = ''
+        while True:
+            try:
+                if document:
+                    document = '\n'.join(document).split('\n')
+                if not argqueue:
+                    cmd = self.request_input(prompt)
+                else:
+                    cmd = argqueue.pop(0)
+                if mode == 'wait':
+                    argmatch = re.match(arg_expression, cmd)
+                    curr_scope = argmatch.group(1)
+                    instruction = argmatch.group(2)
+                    curr_scope = curr_scope.replace('$', '-1')
+                    # First try to see if target is just a single line number, then try treating it as range
+                    try:
+                        scope = [int(curr_scope), int(curr_scope)]
+                    except ValueError:
+                        if scope == ',':
+                            scope = [0, -1]
+                        elif scope:
+                            scope = [int(curr_scope.split(',')[0]), int(curr_scope.split(',')[1])]
+                        # Else, scope is preserved from last line
+                    # for index, item in enumerate(scope):
+                    #     if item < 0:
+                    #         scope[index] = 0
+                    #     if item > len(document)-1:
+                    #         scope[index] = len(document)
+                    curr_key = instruction[0]
+                    if curr_key == 'a':
+                        mode = 'append'
+                    elif curr_key == 'l':
+                        if not document:
+                            continue
+                        output = []
+                        for index, item in enumerate(scope):
+                            if item == -1:
+                                scope[index] = len(document)-1
+                        i = scope[0]
+                        while True:
+                            output.append(document[i].replace('$', '\$')+'$')
+                            i += 1
+                            if i > scope[1]:
+                                break
+                        self.output = '\n'.join(output)
+                        self.flush()
+                    elif curr_key == 'w':
+                        try:
+                            dest = cmd.split()[1]
+                            file_path = '/'.join(dest.split('/')[:-1])
+                            file_name = dest.split('/')[-1]
+                            attempt = self.parse_path(file_path)
+                            if (attempt[file_name] != '%SPECIAL_NULL_FILE%') and (type(attempt) == dict) and (type(attempt[file_name]) == str):
+                               attempt[file_name] = '\n'.join(document)
+                        except IndexError:
+                            continue
+                        except KeyError:
+                            attempt[file_name] = '\n'.join(document)
+                        self.output = (len('\n'.join(document)))
+                        self.flush()
+                    elif curr_key == 'i':
+                        mode = 'insert'
+                    elif curr_key == 'd':
+                        document = document[:scope[0]]+document[scope[1]:]
+                        scope = [scope[0], scope[0]]
+                    elif curr_key == 'c':
+                        document = document[:scope[0]] + document[scope[1]:]
+                        scope = [scope[0], scope[0]]
+                        mode = 'append'
+                    elif curr_key == 's':
+                        if not document:
+                            continue
+                        instruction = instruction.split('/')
+                        for index, item in enumerate(scope):
+                            if item == -1:
+                                scope[index] = len(document)-1
+                        i = scope[0]
+                        while True:
+                            document[i] = re.sub(re.compile(instruction[1]), instruction[2], document[i])
+                            i += 1
+                            if i > scope[1]:
+                                break
+                    elif curr_key == 'p':
+                        if not document:
+                            continue
+                        output = []
+                        for index, item in enumerate(scope):
+                            if item == -1:
+                                scope[index] = len(document)-1
+                        i = scope[0]
+                        while True:
+                            output.append(document[i])
+                            i += 1
+                            if i > scope[1]:
+                                break
+                        self.output = '\n'.join(output)
+                        self.flush()
+                    elif curr_key == 'g':
+                        ops = cmd.split('/')
+                        pattern = ops[1]
+                        subcmdlist = '/'.join(ops[2:]).split('\\')
+                        foundlines = []
+                        for index, line in enumerate(document):
+                            if re.match(re.compile(pattern), line):
+                                foundlines.append(index)
+                        for index in foundlines:
+                            print([str(index)+x for x in subcmdlist])
+                            argqueue += [str(index)+x for x in subcmdlist]
+                    elif curr_key == 'P':
+                        prompt = '> '
+                    elif curr_key == '!':
+                        self.redirect_output = True
+                        self.onecmd(cmd[1:])
+                        document.append('\n'.join(self.output_buffer))
+                        self.output_buffer = []
+                        self.redirect_output = False
+                    elif curr_key == 'q':
+                        return '\n'.join(document)
+                elif mode == 'append':
+                    if cmd != '.':
+                        document.insert(scope[0]+1, cmd)
+                        scope = [scope[0]+1, scope[0]+1]
+                    else:
+                        mode = 'wait'
+                elif mode == 'insert':
+                    if cmd != '.':
+                        if document:
+                            if scope[0] > 0:
+                                document.insert(scope[0]-1, cmd)
+                            else:
+                                document = [cmd]+document
+                            scope = [scope[0] + 1, scope[0] + 1]
+                        else:
+                            document = [cmd]
+                    else:
+                        mode = 'wait'
+            except KeyboardInterrupt:
+                continue
+
+
 
     def do_shutdown(self, args):
         """Shutdown computer: shutdown"""
