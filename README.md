@@ -42,3 +42,18 @@ A self-contained simulation of a bash-like shell, with scripting, piping, stream
 
 ### Filename matching
 `rm` and `cat` support filename matching. `*` to match anything, `?` to match a single character, `[abc]` to match any character in `abc`, `[^abc]` to match any character not in `abc`.
+
+## Lined (LINe EDitor)
+Based on the `ed` editor. Commands should be issued in the format `A,BcP` where `A,B` is a line range (defaults to the last line you added), `c` is the command and `P` the arguments. If you use `,` in place of `A,B` the range is the entire document. If you just use a single line number it will only target that single line. `cat file.txt | lined` will push all commands in `file.txt` to lined.
+
+Supports the following commands:
+* `a`: Append after line, switch to insert mode (Treat all commands as lines to be inserted until lined receives a single `.`)
+* `i`: Insert before line, switch to insert mode
+* `c`: Change
+* `d`: Delete
+* `l`: List
+* `w filename`: Write to `filename`, outputing number of characters written on successful write
+* `!command`: Run `command` in shell and add output to document
+* `s/re/new`: Substitute everything in range based on regular expression `re` with the text `new`
+* `g/re/p`: Global search for all lines that match regex `re`, issuing command string `p`. Command strings can be separated by `\` for multiple commands (Commands that insert lines or delete them will mess up under the current implementation)
+* `q`: Quit
