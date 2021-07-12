@@ -4,3 +4,4 @@ def do_greet(self, args):
 
 
 module_directory = {'greet': do_greet}
+startup_script_directory = {}
