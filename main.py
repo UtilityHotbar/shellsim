@@ -4,62 +4,77 @@ import random
 import re
 import types
 import external_module_repo
-import pickle
 import ast
 import operator as op
 import json
+import os
+import pickle
+
+try:
+    import sqlitedict
+except ImportError:
+    os.system('pip3 install sqlitedict')
+    import sqlitedict
+
 
 operators = {ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul,
              ast.Div: op.truediv, ast.Pow: op.pow, ast.BitXor: op.xor,
-             ast.USub: op.neg}
+             ast.USub: op.neg, ast.Not: op.not_}
 
-permitted_functions = {'len': len, 'type': type}
+permitted_functions = {'len': len, 'type': type, 'int': int}
 
 class Computer(cmd.Cmd):
-    def __init__(self, users=None, drive=None, save_location="save.pickle"):
-        self.name = 'DoorOSMachine'
-        self.specs = {'OS': 'doorOS==3.1', 'defender': None}
-        if not drive:
-            with open('dooros_filesystem.json', 'r') as f:
-                self.filesystem = json.load(f)
-        else:
-            self.filesystem = drive
-        self.speed = 0.1
-        self.save_location = save_location
+    def __init__(self, users=None, drive=None, save_location="main_save.save"):
+            self.name = 'DoorOSMachine'
+            self.specs = {'OS': 'doorOS==3.1', 'defender': None}
 
-        # Current working directory path and directory contents
-        self.cwd = '/'
-        self.curr_dir = self.filesystem
+            if not drive:
+                with open('dooros_filesystem.json', 'r') as f:
+                    self.filesystem = json.load(f)
+            else:
+                self.filesystem = drive
+            self.speed = 0.1
+            self.save_location = save_location
 
-        # Current users
-        if not users:
-            print('NEW USER LOGIN')
-            user_name = input('Create username: ')
-            password = input('Create password: ')
-            self.users = {'root': {'password': 'toor', 'permissions': 'root'},
-                          user_name: {'password': password, 'permissions': 'sudo'}}
-        else:
-            self.users = users
-        self.curr_user = None
-        self.prompt = '(INVALID ACCESS) '
+            # Current working directory path and directory contents
+            self.cwd = '/'
 
-        # System variables
-        self.forbidden_chars = ['/', ' ', '>', '*', '\\', '?', '{', '}']
-        self.null_output = 'NUL'
-        self.variables = {}
-        self.permitted_internal_functions = {'parse_path': self.parse_path}
+            # Current users
+            if not users:
+                print('NEW USER LOGIN')
+                user_name = input('Create username: ')
+                password = input('Create password: ')
+                self.users = {'root': {'password': 'toor', 'permissions': 'root'},
+                              user_name: {'password': password, 'permissions': 'sudo'}}
+            else:
+                self.users = users
+            self.curr_user = 'root'
+            self.prompt = '(INVALID ACCESS) '
 
-        # Stdio
-        self.output = None
-        self.redirect_output = False
-        self.output_buffer = []
-        self.output_mode = 'echo'
-        self.output_location = None
-        self.input_stream = []
-        super().__init__()
+            # System variables
+            self.forbidden_chars = ['/', ' ', '>', '*', '\\', '?', '{', '}']
+            self.null_output = 'NUL'
+            self.variables = {}
+            self.permitted_internal_functions = {'parse_path': self.parse_path}
+            self.permitted_internal_variables = ['complex_commands']
+            self.complex_commands = ['lined']  # For these commands, don't split arguments
+            self.curr_processes = ['shell']
+            self.curr_connections = []
+
+            # Stdio
+            self.output = None
+            self.redirect_output = False
+            self.output_buffer = []
+            self.output_mode = 'echo'
+            self.output_location = None
+            self.input_stream = []
+            super().__init__()
+
+    def emptyline(self):
+        return
 
     def eval_expr(self, expr):
-        return self.eval_(ast.parse(expr, mode='eval').body)
+        return self.eval_(ast.parse(expr.encode('unicode_escape'), mode='eval').body)
 
     def eval_(self, node):
         if isinstance(node, ast.Num):  # <number>
@@ -70,6 +85,26 @@ class Computer(cmd.Cmd):
             return operators[type(node.op)](self.eval_(node.left), self.eval_(node.right))
         elif isinstance(node, ast.UnaryOp):  # <operator> <operand> e.g., -1
             return operators[type(node.op)](self.eval_(node.operand))
+        elif isinstance(node, ast.Slice):
+            if node.lower:
+                lower = self.eval_(node.lower)
+            else:
+                lower = 0
+            if node.upper:
+                upper = self.eval_(node.upper)
+            else:
+                upper = '$'
+            return [lower, upper]
+        elif isinstance(node, ast.Subscript):
+            root_string = self.eval_(node.value)
+            target_range = self.eval_(node.slice)
+            if type(target_range) == int:
+                return root_string[target_range]
+            elif type(target_range) == list:
+                if target_range[1] != '$':
+                    return root_string[target_range[0]:target_range[1]]
+                else:
+                    return root_string[target_range[0]:]
         elif isinstance(node, ast.Compare):
             curr_left = self.eval_(node.left)
             if len(node.ops) == 1:
@@ -116,7 +151,7 @@ class Computer(cmd.Cmd):
                 return 'EVALUATION_ERROR'
         else:
             ast.dump(node)
-            print(f'Evaluation of node {node} failed')
+            print(f'Evaluation of node {ast.dump(node)} failed')
             raise TypeError(node)
 
     def delay_print(self, *args):
@@ -146,16 +181,26 @@ class Computer(cmd.Cmd):
         self.cmdloop()
 
     def evaluate_expressions(self, line: str, force_evaluate=False):
-        variable_expression = re.compile(r'\$\S+')
+        variable_expression = re.compile(r'\$\w+')
+        internal_code_expression = re.compile(r'\${([^}]+)}')
         arithmetic_expression = re.compile(r'\(\(\s*(.+)\s*\)\)')
-        for variable in re.findall(variable_expression, line):
-            if (variable[1] == '{') and (variable[-1] == '}'):  # Check for embedded instructions
-                line = line.replace(variable, str(self.onecmd(variable[2:-1])))
+        while re.search(internal_code_expression, line):
+            internal_line = re.search(internal_code_expression, line)
+            self.onecmd(internal_line.group(1))
+            if type(self.output) == str:
+                output = '"'+self.output+'"'
             else:
-                try:
-                    line = line.replace(variable, str(self.variables[variable]))
-                except KeyError:
-                    print(f'Error - Variable {variable} not found.')
+                output = str(self.output)
+            line = line.replace(internal_line.group(0), output)
+            self.output = None
+        for variable in re.findall(variable_expression, line):
+            try:
+                target = self.variables[variable]
+                if type(target) == str:
+                    target = '"'+target+'"'
+                line = line.replace(variable, str(target))
+            except KeyError:
+                print(f'Error - Variable {variable} not found.')
                 return self.error_break('VARIABLE_NOT_FOUND_ERROR')
         while True:
             findmath = re.search(arithmetic_expression, line)
@@ -173,27 +218,35 @@ class Computer(cmd.Cmd):
             return line
 
     def parseline(self, line: str):
+        line = line.strip()
+        preline = ''
+        if line.startswith('raw'):
+            skiparea = re.search(r'"(.+)"', line)
+            if skiparea:
+                preline = line.split(skiparea.group(0))[0]+skiparea.group(1)
+                line = line.split(skiparea.group(0))[1]
         line = line.split(';')
         self.cmdqueue += line[1:]
-        line = line[0]
+        line = line[0].strip()
         line = self.evaluate_expressions(line)
-        if '|' in line:
-            line = line.split('|')
-            self.cmdqueue.append('|'.join(line[1:]))
-            self.output_mode = 'pipe'
-            line = line[0]
-        # Streaming output to file is always the last thing so its ok to check it after checking for pipes?
-        elif '>>' in line:
-            line = line.split('>>')
-            self.output_mode = 'file'
-            self.output_location = line[1].strip()
-            line = line[0]
-        elif '>' in line:
-            line = line.split('>')
-            self.output_mode = 'file_overwrite'
-            self.output_location = line[1].strip()
-            line = line[0]
-        return super().parseline(line)
+        if not line.startswith('let'):
+            if '|' in line:
+                line = line.split('|')
+                self.cmdqueue.append('|'.join(line[1:]))
+                self.output_mode = 'pipe'
+                line = line[0]
+            # Streaming output to file is always the last thing so its ok to check it after checking for pipes?
+            elif '>>' in line:
+                line = line.split('>>')
+                self.output_mode = 'file'
+                self.output_location = line[1].strip()
+                line = line[0]
+            elif '>' in line:
+                line = line.split('>')
+                self.output_mode = 'file_overwrite'
+                self.output_location = line[1].strip()
+                line = line[0]
+        return super().parseline(preline+line)
 
     def request_input(self, prompt='Enter input'):
         if not self.input_stream:
@@ -206,13 +259,13 @@ class Computer(cmd.Cmd):
         self.cmdqueue = []
         self.output_mode = 'echo'
         self.output_location = None
-        self.input_stream = None
+        self.input_stream = []
         self.output = f'Process terminated with error code {error_code}'
         return error_code
 
     def save(self):
         with open(self.save_location, 'wb') as f:
-            pickle.dump((self.users, self.filesystem), f)
+            pickle.dump(self, f)
 
     def flush(self):
         # If there is output either print it, add it to the next command in the command queue,
@@ -229,7 +282,10 @@ class Computer(cmd.Cmd):
             if next_commands[0].startswith('run') or next_commands[0].startswith('read'):
                 self.input_stream += self.output.split('\n')
             else:
-                added_arguments = self.output
+                if not True in [True for _ in self.complex_commands if next_commands[0].startswith(_)]:
+                    added_arguments = ' '.join(self.output.split('\n'))
+                else:
+                    added_arguments = self.output
                 if '>' in next_commands[0]:
                     target_split = next_commands[0].split('>')
                     next_commands[0] = target_split[0] + ' ' + added_arguments + '>' + target_split[1]
@@ -249,7 +305,10 @@ class Computer(cmd.Cmd):
                     try:
                         if self.output_mode == 'file':
                             if addition_dir[file_name] != '%SPECIAL_NULL_FILE%':
-                                addition_dir[file_name] += self.output
+                                if addition_dir[file_name]:
+                                    addition_dir[file_name] += '\n'+self.output
+                                else:
+                                    addition_dir[file_name] = self.output
                         elif self.output_mode == 'file_overwrite':
                             if addition_dir[file_name] != '%SPECIAL_NULL_FILE%':
                                 addition_dir[file_name] = self.output
@@ -287,21 +346,30 @@ class Computer(cmd.Cmd):
         """Echo input to output: echo INPUT"""
         self.output = args
 
+    def do_raw(self, args):
+        """Echo raw input to output: raw INPUT"""
+        self.output = args
+
     def do_read(self, args):
         """Read in input stdin or user to variable: read VAR_NAME"""
-        self.variables['$'+args] = self.request_input()
+        args = [x.strip() for x in args.split()]
+        name = re.match(r'(\w+)', args[0]).group(1)
+        prompt = None
+        if len(args) > 1:
+            prompt = ' '.join(args[1:])
+        self.variables['$'+name] = self.request_input(prompt)
 
     def do_declare(self, args):
         """Declare string variable: declare VAR_NAME=VALUE"""
         args = [x.strip() for x in args.split('=')]
-        name = args[0]
+        name = re.match(r'(\w+)', args[0]).group(1)
         value = args[1]
         self.variables['$'+name] = value
 
     def do_let(self, args):
         """Declare variable as result of expression: declare VAR_NAME=EXPR"""
         args = [x.strip() for x in args.split('=')]
-        name = args[0]
+        name = re.match(r'(\w+)', args[0]).group(1)
         value = args[1]
         self.variables['$'+name] = self.eval_expr(value)
 
@@ -316,7 +384,7 @@ class Computer(cmd.Cmd):
             print('Error - if statement does not contain condition.')
             return 'NO_CONDITION_ERROR'
         else:
-            condstring = expr.group(1).replace('-gt', '>').replace('-lt', '<').replace('-n', '0 <').replace('-z','0 ==').replace('!', 'not').replace('&&', 'and').replace('||', 'or')
+            condstring = expr.group(1).replace('-gt', '>').replace('-lt', '<').replace('-n', '0 <').replace('-z','0 ==').replace('! ', 'not ').replace('&&', 'and').replace('||', 'or')
             is_dir = re.search(is_directory_expression, condstring)
             if is_dir:
                 condstring = condstring.replace(is_dir.group(0), f'(type(self.parse_path("{is_dir.group(1)}")) == dict)')
@@ -352,17 +420,28 @@ class Computer(cmd.Cmd):
                 return 'FILE_NOT_FOUND_ERROR'
         if target_file == '%SPECIAL_RANDOM_FILE%':
             self.output = random.random()
+            return
+        elif target_file == '%SPECIAL_NULL_FILE%':
+            return
+        elif target_file == '%SPECIAL_PROCESS_FILE%':
+            self.curr_processes.append(file_name)
+            getattr(self, f'do_{file_name}')('', origin='internal')
+            return
         body = target_file.split('\n')
         pointer = 0
         return_stack = []
         delete_next = False
-        print(body)
         while True:
             line = body[pointer]
-            print(line)
-            specials = ['if', 'goto', 'return']
+            specials = ['if', 'goto', 'return', '#', 'pullfromqueue', ':']
             if not (True in [True for _ in specials if line.startswith(_)]):
-                self.onecmd(line)
+                if '|' in line:
+                    if line.startswith('raw') and not re.search(r'".*|.*".*(|)', line).group(1):  # If there is a raw input line and there are no pipes after the quotes
+                        pass
+                    else:
+                        body.insert(pointer+1, 'pullfromqueue')
+                        delete_next = True
+                self.postcmd(self.onecmd(line), line)
             elif line.startswith('if'):
                 result = self.do_if(line[2:].strip(), return_result=True)
                 targets = [_.strip() for _ in line.split('?')[1].split(':')]
@@ -374,12 +453,17 @@ class Computer(cmd.Cmd):
                     delete_next = True
             elif line.startswith('goto'):
                 return_stack.append(pointer)
-                pointer = body.index(line.split()[1].strip())
+                pointer = body.index(':'+line.split()[1].strip())
             elif line.startswith('return'):
                 pointer = return_stack.pop(-1)
+            elif line.startswith('pullfromqueue'):
+                body.insert(pointer+1, self.cmdqueue.pop(0))
+                delete_next = True
             if delete_next:
-                body.remove(pointer)
-            pointer += 1
+                body.pop(pointer)
+                delete_next = False
+            else:
+                pointer += 1
             if pointer > len(body)-1:
                 break
 
@@ -404,25 +488,41 @@ class Computer(cmd.Cmd):
         """Change current working directory: cd DIR_PATH"""
         attempt = self.parse_path(args, return_path=True)
         if type(attempt) == tuple:
-            self.curr_dir, self.cwd = attempt
+            empty, self.cwd = attempt
 
     def do_ls(self, args):
         """List items in directory: ls / ls DIR_PATH"""
         if args:
+            print(self.parse_path(args))
             target_dir = self.parse_path(args)
             if type(target_dir) == dict:
                 self.output = ' '.join([item for item in target_dir if item[0] != '.'])
         else:
-            self.output = ' '.join(self.curr_dir)
+            print(self.parse_path(self.cwd))
+            self.output = ' '.join(self.parse_path(self.cwd))
 
     def do_mkdir(self, args):
         """Make directory: mkdir DIR_NAME"""
         if args:
-            if self.check_invalid_name(args):
-                print('Error - Invalid character in directory name.')
-                return 'INVALID_NAME_ERROR'
-            else:
-                self.curr_dir[args] = {}
+            dir_path = '/'.join(args.split('/')[:-1])
+            dir_name = args.split('/')[-1]
+            try:
+                attempt = self.parse_path(dir_path)
+                if type(attempt) == dict:
+                    if self.check_invalid_name(dir_name):
+                        print('Error - Invalid character in directory name.')
+                        return 'INVALID_NAME_ERROR'
+                    else:
+                        try:
+                            a = attempt[dir_name]
+                            print(f'Error - Directory {dir_name} already exists.')
+                            return 'DIRECTORY_EXISTS_ERROR'
+                        except KeyError:
+                            attempt[dir_name] = {}
+
+            except KeyError:
+                print(f'Error - File {args} not found.')
+                return 'FILE_NOT_FOUND_ERROR'
 
     def do_rmdir(self, args):
         """Remove directory: rmdir DIR_NAME"""
@@ -448,7 +548,11 @@ class Computer(cmd.Cmd):
         else:
             attempt = self.parse_path(file_path)
             if type(attempt) == dict:
-                attempt[file_name] = ''
+                try:
+                    a = attempt[file_name]
+                except KeyError:
+                    attempt[file_name] = ''
+                    print(attempt)
 
     def do_rm(self, args):
         """Delete file: rm FILE_PATH"""
@@ -508,10 +612,58 @@ class Computer(cmd.Cmd):
     def do_sudo(self, args):
         """Execute command as superuser: sudo COMMAND"""
         if self.users[self.curr_user]['permissions'] == 'sudo':
-            old_user = self.curr_user
-            self.curr_user = 'root'
-            self.onecmd(args)
-            self.curr_user = old_user
+            password = self.request_input('Enter password: ')
+            if password == self.users[self.curr_user]['password']:
+                old_user = self.curr_user
+                self.curr_user = 'root'
+                done = self.onecmd(args)
+                self.curr_user = old_user
+            else:
+                print('Error - Incorrect password.')
+                done = 'INCORRECT_PASSWORD_ERROR'
+        elif self.users[self.curr_user]['permissions'] == 'root':
+            done = self.onecmd(args)
+        else:
+            print('Error - You don\'t have permission to perform this command')
+            done = 'PERMISSION_ERROR'
+        return done
+
+    def do_sysvar(self, args):
+        """Modify system variables: sysvar VAR_NAME CMD(add/del/mod/get) NEW_VAL"""
+        if self.users[self.curr_user]['permissions'] == 'root':
+            args = args.split()
+            newval = ''
+            try:
+                variable = args[0]
+                request = args[1]
+            except IndexError:
+                print('Error - Please specify enough arguments.')
+                return 'INVALID_ARGUMENT_ERROR'
+            if len(args) > 2:
+                newval = ' '.join(args[2:])
+            if variable in self.permitted_internal_variables:
+                curr_val = getattr(self, variable)
+                if request == 'get':
+                    self.output = f'{variable} = {getattr(self, variable)}'
+                elif type(curr_val) == list:
+                    if request == 'add':
+                        curr_val.append(self.eval_expr(newval))
+                        setattr(self, variable, curr_val)
+                    elif request == 'del':
+                        curr_val.remove(self.eval_expr(newval))
+                        setattr(self, variable, curr_val)
+                    elif request == 'mod':
+                        setattr(self, variable, [self.eval_expr(_) for _ in newval.split(',')])
+                else:
+                    if request == 'mod':
+                        setattr(self, variable, self.eval_expr(newval))
+
+            else:
+                print('Error - Invalid or unmodifiable internal variable specified.')
+                return 'INVALID_SYSTEM_VARIABLE_ERROR'
+        else:
+            print('Error - You don\'t have permission to perform this command')
+            return 'PERMISSION_ERROR'
 
     def do_pkgman(self, args):
         """Manage external packages: pkgman get / remove PKG_1 PKG_2 etc."""
@@ -523,11 +675,57 @@ class Computer(cmd.Cmd):
                 try:
                     func = external_module_repo.module_directory[arg]
                     setattr(self, 'do_'+arg, types.MethodType(func, self))
-                except KeyError:
+                    try:
+                        script = external_module_repo.startup_script_directory[arg]
+                        attempt = self.parse_path('/tmp')
+                        if type(attempt) == str:
+                            self.onecmd('mkdir /tmp')
+                            attempt = self.parse_path('/tmp')
+                        attempt[arg+'_setup.sh'] = script
+                        self.onecmd(f'sudo run /tmp/{arg}_setup.sh')
+                    except KeyboardInterrupt:
+                        print(f'No startup script for module {arg} found or startup script failed')
+                except KeyboardInterrupt:
                     print(f'Error - Module {arg} not found.')
                     return 'MODULE_NOT_FOUND_ERROR'
             elif cmd == 'remove':
                 delattr(self, 'do_'+arg)
+
+    def do_ps(self, args):
+        activeps = ''
+        for index, process in enumerate(self.curr_processes):
+            activeps += f'{index} {process}'
+        self.output = activeps
+
+    def do_kill(self, args):
+        try:
+            self.curr_processes.pop(int(args))
+            if 'shell' not in self.curr_processes:
+                return 'EXIT'
+        except ValueError:
+            print(f'Error - Invalid process id {args}')
+            return 'INVALID_PID_ERROR'
+        except IndexError:
+            print(f'Error - Invalid process id {args}')
+            return 'INVALID_PID_ERROR'
+
+    def do_grep(self, args):
+        args = args.split()
+        location = args[0]
+        searchstring = re.compile(args[1])
+        attempt = self.parse_path(location)
+        results = []
+        if type(attempt) == dict:
+            for item in attempt:
+                if type(item) == str:
+                    for line in item.split('\n'):
+                        if re.match(searchstring, line):
+                            results.append(line)
+        elif type(attempt) == str:
+            for line in attempt.split('\n'):
+                if re.match(searchstring, line):
+                    results.append(line)
+        self.output = '\n'.join(results)
 
     def do_lined(self, args):
         """Basic line editor: lined"""
@@ -675,22 +873,19 @@ class Computer(cmd.Cmd):
             except KeyboardInterrupt:
                 continue
 
-
-
     def do_shutdown(self, args):
         """Shutdown computer: shutdown"""
         self.save()
         return 'EXIT'
 
     def parse_path(self, path, return_path=False):
-        curr_dir = self.curr_dir
-        tempcwd = self.cwd
-        if path == '':
-            pass
-        elif path[0] == '/':
-            curr_dir = self.filesystem
-            path = path[1:]
-            tempcwd = '/'
+        curr_dir = self.filesystem
+        if len(path) > 0:
+            if not path[0] == '/':
+                path = self.cwd+path
+        else:
+            path = self.cwd
+        tempcwd = '/'
         path = path.split('/')
         for item in path:
             if item == '.' or item == '':
@@ -712,12 +907,62 @@ class Computer(cmd.Cmd):
 
 
 def main():
+    import local_web_network
+    universityserver = Computer(
+        users={'root': {'password': 'ModifiedRootPasswordToDeterIntrusion', 'permissions': 'root'},
+               'admin': {'password': 'ThisIsALongConvolutedAndProbablySecurePassword', 'permissions': 'sudo'}},
+        drive={
+            "bin": {
+                ".server": {
+                    "blacklist.txt": "",
+                    "content.txt": "NOVOGROD UNIVERSITY   <br>"
+                                   "----------------------<br>"
+                                   "A leading provider of <br>"
+                                   "excellent technical   <br>"
+                                   "and social education, <br>"
+                                   "Novogrod University is<br>"
+                                   "committed to student  <br>"
+                                   "welfare and excellence<br>"
+                                   ".",
+                    "wait_time.txt": "0",
+                    "message_handler.sh":
+                        "read msg\n"
+                        "let senderaddr = int($msg[8:11])\n"
+                        "let content = $msg[12:]\n"
+                        "if [ ! ${grep /bin/.server/blacklist.txt $senderaddr} ] ? : goto END\n"
+                        "if [ $content != 'FETCH_CONTENT' ] ? goto END\n"
+                        "nd $senderaddr \"\" -f /bin/.server/content.txt -t 0\n"
+                        ":END"
+                }
+            },
+            "users": {
+                "admin": {}
+            },
+            "dev": {
+                "null": "%SPECIAL_NULL_FILE%",
+                "urandom": "%SPECIAL_RANDOM_FILE%",
+            },
+            "tmp": {
+
+            }
+        },
+        save_location='uni_admin_comp.pickle'
+    )
+    universityserver.onecmd('pkgman get server')
+    universityserver.onecmd('pkgman get nd')
+    universityserver.onecmd('run /bin/server')
+
+    peter = local_web_network.make_basic_computer('peter', 'password', {
+        'jobs.txt': 'Update student records\nMark term 3 exams\nSubmit national safety report'})
+    ivan = local_web_network.make_basic_computer('ivan', 'scidept1981', {
+        '3a_grades.txt': 'Tanya Novikova 31\nEkaterina Mikhailovna 57\nSavva Bogdanov 62\nMikhail Simonov 20\nZoya Pavlova 40\nKonstantin Frolov 42\nLev Kuznetsov 45\nOnisim Volkov 47\nStegnov Denisovich 42\nYeltsov Sergeyevich 50',
+        '3b_grades.txt': 'Aptekar Artur Pavlovich 40\nKalganov Tikhonovich 31\nLuski Valerianovich 52\nDaniltsin Konstantinovich 44\nRozhkov Yermolayevich 67\nYugantsev Yaroslavovich 40\nLipin Yegorovich 41\nTurbin Vyacheslavovich 48'})
     try:
-        with open('save.pickle', 'rb') as f:
-            users, drive = pickle.load(f)
+        with open('main_save.save') as f:
+            test = pickle.load(f)
     except FileNotFoundError:
-        users, drive = None, None
-    test = Computer(users=users, drive=drive)
+        test = Computer()
+    local_web_network.Router(test, peter, ivan, universityserver)
     test.startup()
 
 
